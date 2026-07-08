@@ -1,0 +1,556 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PITCHSCOPE — リアルタイムピッチ表示</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=Space+Grotesk:wght@400;500;700&display=swap');
+
+  :root{
+    --bg:#0a0f0d;
+    --panel:#0f1613;
+    --grid:#1a2b25;
+    --phosphor:#4dff9e;
+    --phosphor-dim:#1f6b45;
+    --amber:#ffb648;
+    --red:#ff5c5c;
+    --text:#d7e8df;
+    --text-dim:#5c7a6d;
+  }
+  *{box-sizing:border-box;}
+  html,body{
+    margin:0; padding:0; height:100%;
+    background:var(--bg);
+    color:var(--text);
+    font-family:'IBM Plex Mono', monospace;
+    overflow:hidden;
+  }
+  body{
+    display:flex; flex-direction:column;
+    min-height:100vh;
+  }
+  .scanlines{
+    position:fixed; inset:0; pointer-events:none; z-index:50;
+    background:repeating-linear-gradient(
+      to bottom, rgba(0,0,0,0) 0px, rgba(0,0,0,0) 2px,
+      rgba(0,0,0,0.12) 3px, rgba(0,0,0,0) 4px
+    );
+    mix-blend-mode:overlay;
+    opacity:0.5;
+  }
+  header{
+    padding:18px 24px 10px;
+    display:flex; align-items:baseline; justify-content:space-between;
+    border-bottom:1px solid var(--grid);
+    flex-shrink:0;
+  }
+  .logo{
+    font-family:'Space Grotesk', sans-serif;
+    font-weight:700;
+    font-size:20px;
+    letter-spacing:0.04em;
+    color:var(--phosphor);
+    text-shadow:0 0 12px rgba(77,255,158,0.35);
+  }
+  .logo span{ color:var(--text-dim); font-weight:400; font-size:12px; margin-left:8px; }
+  .status{
+    font-size:11px; letter-spacing:0.08em; color:var(--text-dim);
+    display:flex; align-items:center; gap:8px;
+  }
+  .dot{
+    width:8px; height:8px; border-radius:50%;
+    background:var(--text-dim);
+    transition:background 0.2s, box-shadow 0.2s;
+  }
+  .dot.live{ background:var(--phosphor); box-shadow:0 0 8px var(--phosphor); }
+
+  .controls{
+    display:flex; gap:32px; flex-wrap:wrap;
+    padding:12px 24px;
+    border-bottom:1px solid var(--grid);
+    background:#0c1310;
+    flex-shrink:0;
+  }
+  .ctrl{
+    display:flex; flex-direction:column; gap:4px;
+    min-width:220px; flex:1;
+  }
+  .ctrl label{
+    font-size:11px; letter-spacing:0.05em; color:var(--text);
+  }
+  .ctrl label span{ color:var(--phosphor); font-weight:600; }
+  .ctrl input[type="range"]{
+    -webkit-appearance:none; appearance:none;
+    width:100%; height:4px; background:var(--grid);
+    border-radius:2px; outline:none;
+  }
+  .ctrl input[type="range"]::-webkit-slider-thumb{
+    -webkit-appearance:none; appearance:none;
+    width:14px; height:14px; border-radius:50%;
+    background:var(--phosphor);
+    box-shadow:0 0 8px rgba(77,255,158,0.6);
+    cursor:pointer;
+  }
+  .ctrl input[type="range"]::-moz-range-thumb{
+    width:14px; height:14px; border-radius:50%; border:none;
+    background:var(--phosphor);
+    box-shadow:0 0 8px rgba(77,255,158,0.6);
+    cursor:pointer;
+  }
+  .ctrl-hint{ font-size:10px; color:var(--text-dim); }
+
+  main{
+    flex:1;
+    display:grid;
+    grid-template-columns: 1.1fr 1fr;
+    gap:1px;
+    background:var(--grid);
+    overflow:hidden;
+  }
+  @media (max-width: 760px){
+    main{ grid-template-columns: 1fr; grid-template-rows: auto auto; }
+  }
+
+  .panel{
+    background:var(--panel);
+    padding:20px 24px;
+    display:flex; flex-direction:column;
+    min-height:0;
+  }
+  .panel-label{
+    font-size:10px; letter-spacing:0.15em; color:var(--text-dim);
+    margin-bottom:14px; text-transform:uppercase;
+  }
+
+  /* ---- readout panel ---- */
+  .readout{
+    display:flex; flex-direction:column; align-items:center; justify-content:center;
+    flex:1; gap:6px; text-align:center;
+  }
+  .note-name{
+    font-family:'Space Grotesk', sans-serif;
+    font-weight:700;
+    font-size:min(18vw, 140px);
+    line-height:1;
+    color:var(--phosphor);
+    text-shadow:0 0 30px rgba(77,255,158,0.3);
+    transition:color 0.15s;
+  }
+  .note-name.off{ color:var(--text-dim); text-shadow:none; }
+  .octave{
+    font-size:22px; vertical-align:super; margin-left:2px; color:var(--text-dim);
+  }
+  .freq-value{
+    font-size:20px; color:var(--text);
+    letter-spacing:0.03em;
+  }
+  .freq-value b{ color:var(--phosphor); font-weight:600; }
+
+  .cents-meter{
+    width:100%; max-width:420px; margin-top:22px;
+  }
+  .cents-track{
+    position:relative;
+    height:34px;
+    background:linear-gradient(180deg, #0a1210, #0d1815);
+    border:1px solid var(--grid);
+    border-radius:2px;
+    overflow:visible;
+  }
+  .cents-ticks{
+    position:absolute; inset:0;
+    display:flex; justify-content:space-between;
+    padding:0 1px;
+  }
+  .cents-ticks div{ width:1px; background:var(--grid); }
+  .cents-ticks div.center{ background:var(--text-dim); width:1px; }
+  .cents-needle{
+    position:absolute; top:-4px; bottom:-4px;
+    width:3px; background:var(--phosphor);
+    box-shadow:0 0 10px var(--phosphor);
+    left:50%; transform:translateX(-50%);
+    transition:left 0.08s linear, background 0.15s;
+    border-radius:2px;
+  }
+  .cents-needle.warn{ background:var(--amber); box-shadow:0 0 10px var(--amber); }
+  .cents-needle.hot{ background:var(--red); box-shadow:0 0 10px var(--red); }
+  .cents-labels{
+    display:flex; justify-content:space-between;
+    font-size:10px; color:var(--text-dim); margin-top:6px; letter-spacing:0.05em;
+  }
+  .cents-num{
+    text-align:center; margin-top:10px; font-size:13px; color:var(--text-dim);
+  }
+  .cents-num b{ color:var(--text); font-size:15px; }
+
+  /* ---- scope panel ---- */
+  .scope-wrap{ flex:1; display:flex; flex-direction:column; min-height:0; gap:16px; }
+  canvas{
+    width:100%; height:100%; display:block;
+    background:
+      linear-gradient(var(--grid) 1px, transparent 1px) 0 0/100% 12.5%,
+      linear-gradient(90deg, var(--grid) 1px, transparent 1px) 0 0/8.33% 100%,
+      #08100d;
+    border:1px solid var(--grid);
+    border-radius:2px;
+  }
+  #waveCanvas{ flex:1.3; min-height:0; }
+  #spectrumCanvas{ flex:1; min-height:0; }
+
+  .stats-row{
+    display:flex; gap:24px; font-size:11px; color:var(--text-dim);
+    letter-spacing:0.04em; margin-top:2px;
+  }
+  .stats-row b{ color:var(--text); }
+
+  footer{
+    padding:14px 24px;
+    border-top:1px solid var(--grid);
+    display:flex; align-items:center; justify-content:center;
+    gap:16px; flex-shrink:0;
+  }
+  button{
+    font-family:'IBM Plex Mono', monospace;
+    font-size:13px; letter-spacing:0.06em;
+    background:transparent;
+    color:var(--phosphor);
+    border:1px solid var(--phosphor-dim);
+    padding:10px 28px;
+    border-radius:2px;
+    cursor:pointer;
+    transition:all 0.15s;
+    text-transform:uppercase;
+  }
+  button:hover{ background:rgba(77,255,158,0.08); border-color:var(--phosphor); }
+  button:disabled{ opacity:0.4; cursor:default; }
+  button.stop{ color:var(--red); border-color:#6b2020; }
+  button.stop:hover{ background:rgba(255,92,92,0.08); border-color:var(--red); }
+
+  .hint{ font-size:11px; color:var(--text-dim); text-align:center; max-width:340px; }
+  .error-msg{ color:var(--red); font-size:12px; text-align:center; margin-top:8px; }
+</style>
+</head>
+<body>
+
+<div class="scanlines"></div>
+
+<header>
+  <div class="logo">PITCHSCOPE<span>REAL-TIME PITCH ANALYZER</span></div>
+  <div class="status"><div class="dot" id="liveDot"></div><span id="statusText">STANDBY</span></div>
+</header>
+
+<div class="controls">
+  <div class="ctrl">
+    <label for="gateSlider">ノイズゲート <span id="gateVal">0.0015</span></label>
+    <input type="range" id="gateSlider" min="0" max="0.02" step="0.0005" value="0.0015">
+    <span class="ctrl-hint">小さいほど小さい声・音でも拾う</span>
+  </div>
+  <div class="ctrl">
+    <label for="claritySlider">クラリティ閾値 <span id="clarityVal">0.75</span></label>
+    <input type="range" id="claritySlider" min="0.3" max="0.98" step="0.01" value="0.75">
+    <span class="ctrl-hint">小さいほど雑音でも音程判定されやすい(誤検出も増える)</span>
+  </div>
+</div>
+
+<main>
+  <div class="panel">
+    <div class="panel-label">Detected Pitch</div>
+    <div class="readout">
+      <div class="note-name off" id="noteName">–</div>
+      <div class="freq-value"><b id="freqValue">0.0</b> Hz</div>
+
+      <div class="cents-meter">
+        <div class="cents-track">
+          <div class="cents-ticks">
+            <div></div><div></div><div></div><div></div><div class="center"></div><div></div><div></div><div></div><div></div>
+          </div>
+          <div class="cents-needle" id="centsNeedle"></div>
+        </div>
+        <div class="cents-labels"><span>-50¢</span><span>0¢</span><span>+50¢</span></div>
+        <div class="cents-num"><b id="centsValue">0</b> cents</div>
+      </div>
+    </div>
+    <div class="error-msg" id="errorMsg"></div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-label">Waveform / Spectrum</div>
+    <div class="scope-wrap">
+      <canvas id="waveCanvas"></canvas>
+      <canvas id="spectrumCanvas"></canvas>
+      <div class="stats-row">
+        <span>Sample Rate: <b id="sampleRate">–</b></span>
+        <span>FFT Size: <b id="fftSize">2048</b></span>
+        <span>Clarity: <b id="clarity">–</b></span>
+      </div>
+    </div>
+  </div>
+</main>
+
+<footer>
+  <button id="toggleBtn">Start</button>
+  <div class="hint">マイクへのアクセスを許可すると、音の高さ(周波数)をリアルタイムに検出します。楽器のチューニングや発声練習に。</div>
+</footer>
+
+<script>
+(function(){
+  const noteNameEl = document.getElementById('noteName');
+  const freqValueEl = document.getElementById('freqValue');
+  const centsNeedleEl = document.getElementById('centsNeedle');
+  const centsValueEl = document.getElementById('centsValue');
+  const toggleBtn = document.getElementById('toggleBtn');
+  const liveDot = document.getElementById('liveDot');
+  const statusText = document.getElementById('statusText');
+  const errorMsg = document.getElementById('errorMsg');
+  const sampleRateEl = document.getElementById('sampleRate');
+  const fftSizeEl = document.getElementById('fftSize');
+  const clarityEl = document.getElementById('clarity');
+  const waveCanvas = document.getElementById('waveCanvas');
+  const spectrumCanvas = document.getElementById('spectrumCanvas');
+  const waveCtx = waveCanvas.getContext('2d');
+  const spectrumCtx = spectrumCanvas.getContext('2d');
+
+  const NOTE_NAMES = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+  const A4 = 440;
+
+  let audioCtx, analyser, source, mediaStream;
+  let running = false;
+  let rafId = null;
+  let smoothedFreq = null;
+  const FFT_SIZE = 2048;
+
+  // 調整可能パラメータ(スライダーから更新される)
+  let NOISE_GATE = 0.0015;
+  let CLARITY_GATE = 0.75;
+
+  const gateSlider = document.getElementById('gateSlider');
+  const claritySlider = document.getElementById('claritySlider');
+  const gateVal = document.getElementById('gateVal');
+  const clarityValLabel = document.getElementById('clarityVal');
+
+  gateSlider.addEventListener('input', () => {
+    NOISE_GATE = parseFloat(gateSlider.value);
+    gateVal.textContent = NOISE_GATE.toFixed(3);
+  });
+  claritySlider.addEventListener('input', () => {
+    CLARITY_GATE = parseFloat(claritySlider.value);
+    clarityValLabel.textContent = CLARITY_GATE.toFixed(2);
+  });
+
+  function resizeCanvas(canvas){
+    const rect = canvas.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = rect.width * dpr;
+    canvas.height = rect.height * dpr;
+    const ctx = canvas.getContext('2d');
+    ctx.setTransform(dpr,0,0,dpr,0,0);
+  }
+
+  function freqToNote(freq){
+    if (!freq || freq <= 0) return null;
+    const midi = 69 + 12 * Math.log2(freq / A4);
+    const rounded = Math.round(midi);
+    const cents = Math.round((midi - rounded) * 100);
+    const name = NOTE_NAMES[((rounded % 12) + 12) % 12];
+    const octave = Math.floor(rounded / 12) - 1;
+    return { name, octave, cents, midi: rounded };
+  }
+
+  // Autocorrelation-based pitch detection (ACF2+ style) with parabolic interpolation
+  function autoCorrelate(buffer, sampleRate){
+    const SIZE = buffer.length;
+    let rms = 0;
+    for (let i = 0; i < SIZE; i++){ rms += buffer[i]*buffer[i]; }
+    rms = Math.sqrt(rms / SIZE);
+    if (rms < NOISE_GATE) return { freq: -1, clarity: 0 }; // too quiet
+
+    // normalize amplitude so quiet input still yields a strong autocorrelation peak
+    let peakAbs = 0;
+    for (let i = 0; i < SIZE; i++){ const a = Math.abs(buffer[i]); if (a > peakAbs) peakAbs = a; }
+    const gain = peakAbs > 0 ? (0.8 / peakAbs) : 1;
+    const norm = new Float32Array(SIZE);
+    for (let i = 0; i < SIZE; i++){ norm[i] = buffer[i] * gain; }
+    buffer = norm;
+
+    // trim leading/trailing silence
+    let r1 = 0, r2 = SIZE - 1;
+    const thres = 0.2;
+    for (let i = 0; i < SIZE/2; i++){ if (Math.abs(buffer[i]) > thres){ r1 = i; break; } }
+    for (let i = 1; i < SIZE/2; i++){ if (Math.abs(buffer[SIZE - i]) > thres){ r2 = SIZE - i; break; } }
+    const trimmed = buffer.slice(r1, r2);
+    const n = trimmed.length;
+
+    const c = new Array(n).fill(0);
+    for (let lag = 0; lag < n; lag++){
+      let sum = 0;
+      for (let i = 0; i < n - lag; i++){ sum += trimmed[i] * trimmed[i + lag]; }
+      c[lag] = sum;
+    }
+
+    let d = 0;
+    while (d < n - 1 && c[d] > c[d+1]) d++;
+
+    let maxVal = -1, maxPos = -1;
+    for (let i = d; i < n; i++){
+      if (c[i] > maxVal){ maxVal = c[i]; maxPos = i; }
+    }
+    let T0 = maxPos;
+
+    if (T0 <= 0) return { freq: -1, clarity: 0 };
+
+    // parabolic interpolation
+    const x1 = c[T0 - 1] || c[T0];
+    const x2 = c[T0];
+    const x3 = c[T0 + 1] || c[T0];
+    const a = (x1 + x3 - 2 * x2) / 2;
+    const b = (x3 - x1) / 2;
+    if (a) T0 = T0 - b / (2 * a);
+
+    const freq = sampleRate / T0;
+    const clarity = c[0] ? Math.max(0, Math.min(1, maxVal / c[0])) : 0;
+    return { freq, clarity };
+  }
+
+  function updateReadout(freq, clarity){
+    if (freq && freq > 50 && freq < 1600 && clarity > CLARITY_GATE){
+      smoothedFreq = smoothedFreq === null ? freq : smoothedFreq * 0.72 + freq * 0.28;
+      const note = freqToNote(smoothedFreq);
+      noteNameEl.classList.remove('off');
+      noteNameEl.innerHTML = note.name.replace('#','<span style="opacity:0.7">♯</span>') +
+        '<span class="octave">' + note.octave + '</span>';
+      freqValueEl.textContent = smoothedFreq.toFixed(1);
+      centsValueEl.textContent = (note.cents > 0 ? '+' : '') + note.cents;
+
+      const pct = Math.max(-50, Math.min(50, note.cents));
+      centsNeedleEl.style.left = (50 + pct/50 * 45) + '%';
+      centsNeedleEl.classList.remove('warn','hot');
+      if (Math.abs(note.cents) > 30) centsNeedleEl.classList.add('hot');
+      else if (Math.abs(note.cents) > 10) centsNeedleEl.classList.add('warn');
+
+      clarityEl.textContent = Math.round(clarity * 100) + '%';
+    } else {
+      noteNameEl.classList.add('off');
+      noteNameEl.textContent = '–';
+      freqValueEl.textContent = '0.0';
+      centsValueEl.textContent = '0';
+      centsNeedleEl.style.left = '50%';
+      centsNeedleEl.classList.remove('warn','hot');
+      clarityEl.textContent = clarity ? Math.round(clarity * 100) + '%' : '–';
+      smoothedFreq = null;
+    }
+  }
+
+  function drawWave(buffer){
+    const w = waveCanvas.clientWidth, h = waveCanvas.clientHeight;
+    waveCtx.clearRect(0,0,w,h);
+    waveCtx.lineWidth = 2;
+    waveCtx.strokeStyle = '#4dff9e';
+    waveCtx.shadowColor = '#4dff9e';
+    waveCtx.shadowBlur = 8;
+    waveCtx.beginPath();
+    const step = buffer.length / w;
+    for (let x = 0; x < w; x++){
+      const v = buffer[Math.floor(x * step)];
+      const y = h/2 + v * (h/2) * 0.9;
+      if (x === 0) waveCtx.moveTo(x, y); else waveCtx.lineTo(x, y);
+    }
+    waveCtx.stroke();
+    waveCtx.shadowBlur = 0;
+  }
+
+  function drawSpectrum(freqData){
+    const w = spectrumCanvas.clientWidth, h = spectrumCanvas.clientHeight;
+    spectrumCtx.clearRect(0,0,w,h);
+    const bars = 96;
+    const usable = Math.floor(freqData.length * 0.5); // focus on lower half (musical range)
+    const step = usable / bars;
+    const barW = w / bars;
+    for (let i = 0; i < bars; i++){
+      let sum = 0, count = 0;
+      const start = Math.floor(i * step);
+      const end = Math.floor((i+1) * step);
+      for (let j = start; j < end; j++){ sum += freqData[j]; count++; }
+      const avg = count ? sum / count : 0;
+      const norm = Math.max(0, (avg + 100) / 100);
+      const barH = norm * h;
+      const grad = spectrumCtx.createLinearGradient(0, h - barH, 0, h);
+      grad.addColorStop(0, '#4dff9e');
+      grad.addColorStop(1, '#1f6b45');
+      spectrumCtx.fillStyle = grad;
+      spectrumCtx.fillRect(i * barW + 1, h - barH, barW - 2, barH);
+    }
+  }
+
+  function loop(){
+    const buffer = new Float32Array(analyser.fftSize);
+    analyser.getFloatTimeDomainData(buffer);
+    const freqData = new Float32Array(analyser.frequencyBinCount);
+    analyser.getFloatFrequencyData(freqData);
+
+    const { freq, clarity } = autoCorrelate(buffer, audioCtx.sampleRate);
+    updateReadout(freq, clarity);
+    drawWave(buffer);
+    drawSpectrum(freqData);
+
+    rafId = requestAnimationFrame(loop);
+  }
+
+  async function start(){
+    errorMsg.textContent = '';
+    try {
+      mediaStream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation:false, noiseSuppression:false, autoGainControl:true }
+      });
+    } catch (err){
+      errorMsg.textContent = 'マイクにアクセスできませんでした: ' + err.message;
+      return;
+    }
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    analyser = audioCtx.createAnalyser();
+    analyser.fftSize = FFT_SIZE;
+    analyser.smoothingTimeConstant = 0.1;
+    source = audioCtx.createMediaStreamSource(mediaStream);
+    source.connect(analyser);
+
+    sampleRateEl.textContent = audioCtx.sampleRate + ' Hz';
+    fftSizeEl.textContent = FFT_SIZE;
+
+    running = true;
+    liveDot.classList.add('live');
+    statusText.textContent = 'LISTENING';
+    toggleBtn.textContent = 'Stop';
+    toggleBtn.classList.add('stop');
+
+    resizeCanvas(waveCanvas);
+    resizeCanvas(spectrumCanvas);
+    loop();
+  }
+
+  function stop(){
+    running = false;
+    if (rafId) cancelAnimationFrame(rafId);
+    if (mediaStream) mediaStream.getTracks().forEach(t => t.stop());
+    if (audioCtx) audioCtx.close();
+    liveDot.classList.remove('live');
+    statusText.textContent = 'STANDBY';
+    toggleBtn.textContent = 'Start';
+    toggleBtn.classList.remove('stop');
+    updateReadout(-1, 0);
+    waveCtx.clearRect(0,0,waveCanvas.width, waveCanvas.height);
+    spectrumCtx.clearRect(0,0,spectrumCanvas.width, spectrumCanvas.height);
+  }
+
+  toggleBtn.addEventListener('click', () => { running ? stop() : start(); });
+
+  window.addEventListener('resize', () => {
+    if (running){
+      resizeCanvas(waveCanvas);
+      resizeCanvas(spectrumCanvas);
+    }
+  });
+})();
+</script>
+
+</body>
+</html>

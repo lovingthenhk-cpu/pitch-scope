@@ -250,6 +250,36 @@
 
   .hint{ font-size:11px; color:var(--text-dim); text-align:center; max-width:340px; }
   .error-msg{ color:var(--red); font-size:12px; text-align:center; margin-top:8px; }
+
+  .rec-panel{
+    display:none;
+    align-items:center; justify-content:center; gap:16px;
+    flex-wrap:wrap;
+    padding:12px 24px 20px;
+  }
+  .rec-panel.show{ display:flex; }
+  .rec-panel-label{
+    font-size:11px; letter-spacing:0.06em; color:var(--text-dim);
+    display:flex; align-items:center; gap:8px;
+  }
+  .rec-dot{
+    width:8px; height:8px; border-radius:50%; background:var(--red);
+    box-shadow:0 0 8px var(--red);
+  }
+  audio#playback{
+    height:32px; max-width:320px;
+  }
+  #downloadLink{
+    font-family:'IBM Plex Mono', monospace;
+    font-size:12px; letter-spacing:0.05em;
+    color:var(--phosphor);
+    border:1px solid var(--phosphor-dim);
+    padding:7px 16px;
+    border-radius:2px;
+    text-decoration:none;
+    transition:all 0.15s;
+  }
+  #downloadLink:hover{ background:rgba(77,255,158,0.08); border-color:var(--phosphor); }
 </style>
 </head>
 <body>
@@ -326,6 +356,12 @@
   <div class="hint">マイクへのアクセスを許可すると、音の高さ(周波数)をリアルタイムに検出します。楽器のチューニングや発声練習に。</div>
 </footer>
 
+<div class="rec-panel" id="recPanel">
+  <div class="rec-panel-label"><span class="rec-dot" id="recDot"></span>録音完了</div>
+  <audio id="playback" controls></audio>
+  <a id="downloadLink" download>ダウンロード</a>
+</div>
+
 <script>
 (function(){
   const noteNameEl = document.getElementById('noteName');
@@ -346,6 +382,9 @@
   const waveCtx = waveCanvas.getContext('2d');
   const spectrumCtx = spectrumCanvas.getContext('2d');
   const harmonicsCtx = harmonicsCanvas.getContext('2d');
+  const recPanel = document.getElementById('recPanel');
+  const playbackEl = document.getElementById('playback');
+  const downloadLink = document.getElementById('downloadLink');
 
   const NOTE_NAMES = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
   const A4 = 440;
@@ -355,6 +394,10 @@
   let rafId = null;
   let smoothedFreq = null;
   const FFT_SIZE = 2048;
+
+  let mediaRecorder = null;
+  let recordedChunks = [];
+  let lastRecordingUrl = null;
 
   // 調整可能パラメータ(スライダーから更新される)
   let NOISE_GATE = 0.0015;
@@ -599,6 +642,15 @@
     rafId = requestAnimationFrame(loop);
   }
 
+  function pickMimeType(){
+    if (!window.MediaRecorder || !MediaRecorder.isTypeSupported) return '';
+    const candidates = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', 'audio/ogg;codecs=opus'];
+    for (const type of candidates){
+      if (MediaRecorder.isTypeSupported(type)) return type;
+    }
+    return '';
+  }
+
   async function start(){
     errorMsg.textContent = '';
     try {
@@ -619,9 +671,24 @@
     sampleRateEl.textContent = audioCtx.sampleRate + ' Hz';
     fftSizeEl.textContent = FFT_SIZE;
 
+    // 録音開始
+    if (lastRecordingUrl){ URL.revokeObjectURL(lastRecordingUrl); lastRecordingUrl = null; }
+    recPanel.classList.remove('show');
+    recordedChunks = [];
+    mediaRecorder = null;
+    const mimeType = pickMimeType();
+    try {
+      mediaRecorder = mimeType ? new MediaRecorder(mediaStream, { mimeType }) : new MediaRecorder(mediaStream);
+      mediaRecorder.ondataavailable = (e) => { if (e.data && e.data.size > 0) recordedChunks.push(e.data); };
+      mediaRecorder.start();
+    } catch (err){
+      mediaRecorder = null;
+      console.warn('録音を開始できませんでした:', err);
+    }
+
     running = true;
     liveDot.classList.add('live');
-    statusText.textContent = 'LISTENING';
+    statusText.textContent = mediaRecorder ? 'LISTENING · REC' : 'LISTENING';
     toggleBtn.textContent = 'Stop';
     toggleBtn.classList.add('stop');
 
@@ -634,6 +701,23 @@
   function stop(){
     running = false;
     if (rafId) cancelAnimationFrame(rafId);
+
+    if (mediaRecorder && mediaRecorder.state !== 'inactive'){
+      mediaRecorder.onstop = () => {
+        if (recordedChunks.length === 0) return;
+        const mimeType = mediaRecorder.mimeType || 'audio/webm';
+        const blob = new Blob(recordedChunks, { type: mimeType });
+        lastRecordingUrl = URL.createObjectURL(blob);
+        playbackEl.src = lastRecordingUrl;
+        const ext = mimeType.includes('mp4') ? 'm4a' : mimeType.includes('ogg') ? 'ogg' : 'webm';
+        const ts = new Date().toISOString().replace(/[:.]/g, '-');
+        downloadLink.href = lastRecordingUrl;
+        downloadLink.download = `pitchscope-${ts}.${ext}`;
+        recPanel.classList.add('show');
+      };
+      mediaRecorder.stop();
+    }
+
     if (mediaStream) mediaStream.getTracks().forEach(t => t.stop());
     if (audioCtx) audioCtx.close();
     liveDot.classList.remove('live');

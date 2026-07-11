@@ -353,7 +353,7 @@
 
 <footer>
   <button id="toggleBtn">Start</button>
-  <div class="hint">マイクへのアクセスを許可すると、音の高さ(周波数)をリアルタイムに検出します。楽器のチューニングや発声練習に。</div>
+  <div class="hint">マイクへのアクセスを許可すると解析(ピッチ・スペクトル・倍音構造)が自動で常時オンになります。ボタンは録音の開始/停止専用です。</div>
 </footer>
 
 <div class="rec-panel" id="recPanel">
@@ -651,7 +651,7 @@
     return '';
   }
 
-  async function start(){
+  async function initMic(){
     errorMsg.textContent = '';
     try {
       mediaStream = await navigator.mediaDevices.getUserMedia({
@@ -671,7 +671,17 @@
     sampleRateEl.textContent = audioCtx.sampleRate + ' Hz';
     fftSizeEl.textContent = FFT_SIZE;
 
-    // 録音開始
+    running = true;
+    liveDot.classList.add('live');
+    statusText.textContent = 'LISTENING';
+
+    resizeCanvas(waveCanvas);
+    resizeCanvas(spectrumCanvas);
+    resizeCanvas(harmonicsCanvas);
+    loop();
+  }
+
+  function startRecording(){
     if (lastRecordingUrl){ URL.revokeObjectURL(lastRecordingUrl); lastRecordingUrl = null; }
     recPanel.classList.remove('show');
     recordedChunks = [];
@@ -681,57 +691,50 @@
       mediaRecorder = mimeType ? new MediaRecorder(mediaStream, { mimeType }) : new MediaRecorder(mediaStream);
       mediaRecorder.ondataavailable = (e) => { if (e.data && e.data.size > 0) recordedChunks.push(e.data); };
       mediaRecorder.start();
+      statusText.textContent = 'LISTENING · REC';
+      toggleBtn.textContent = 'Stop';
+      toggleBtn.classList.add('stop');
     } catch (err){
       mediaRecorder = null;
-      console.warn('録音を開始できませんでした:', err);
+      errorMsg.textContent = '録音を開始できませんでした: ' + err.message;
     }
-
-    running = true;
-    liveDot.classList.add('live');
-    statusText.textContent = mediaRecorder ? 'LISTENING · REC' : 'LISTENING';
-    toggleBtn.textContent = 'Stop';
-    toggleBtn.classList.add('stop');
-
-    resizeCanvas(waveCanvas);
-    resizeCanvas(spectrumCanvas);
-    resizeCanvas(harmonicsCanvas);
-    loop();
   }
 
-  function stop(){
-    running = false;
-    if (rafId) cancelAnimationFrame(rafId);
-
-    if (mediaRecorder && mediaRecorder.state !== 'inactive'){
-      mediaRecorder.onstop = () => {
-        if (recordedChunks.length === 0) return;
-        const mimeType = mediaRecorder.mimeType || 'audio/webm';
-        const blob = new Blob(recordedChunks, { type: mimeType });
-        lastRecordingUrl = URL.createObjectURL(blob);
-        playbackEl.src = lastRecordingUrl;
-        const ext = mimeType.includes('mp4') ? 'm4a' : mimeType.includes('ogg') ? 'ogg' : 'webm';
-        const ts = new Date().toISOString().replace(/[:.]/g, '-');
-        downloadLink.href = lastRecordingUrl;
-        downloadLink.download = `pitchscope-${ts}.${ext}`;
-        recPanel.classList.add('show');
-      };
-      mediaRecorder.stop();
-    }
-
-    if (mediaStream) mediaStream.getTracks().forEach(t => t.stop());
-    if (audioCtx) audioCtx.close();
-    liveDot.classList.remove('live');
-    statusText.textContent = 'STANDBY';
+  function stopRecording(){
+    if (!mediaRecorder || mediaRecorder.state === 'inactive') return;
+    mediaRecorder.onstop = () => {
+      if (recordedChunks.length === 0) return;
+      const mimeType = mediaRecorder.mimeType || 'audio/webm';
+      const blob = new Blob(recordedChunks, { type: mimeType });
+      lastRecordingUrl = URL.createObjectURL(blob);
+      playbackEl.src = lastRecordingUrl;
+      const ext = mimeType.includes('mp4') ? 'm4a' : mimeType.includes('ogg') ? 'ogg' : 'webm';
+      const ts = new Date().toISOString().replace(/[:.]/g, '-');
+      downloadLink.href = lastRecordingUrl;
+      downloadLink.download = `pitchscope-${ts}.${ext}`;
+      recPanel.classList.add('show');
+    };
+    mediaRecorder.stop();
+    statusText.textContent = 'LISTENING';
     toggleBtn.textContent = 'Start';
     toggleBtn.classList.remove('stop');
-    updateReadout(-1, 0);
-    waveCtx.clearRect(0,0,waveCanvas.width, waveCanvas.height);
-    spectrumCtx.clearRect(0,0,spectrumCanvas.width, spectrumCanvas.height);
-    harmonicsCtx.clearRect(0,0,harmonicsCanvas.width, harmonicsCanvas.height);
-    harmonicsF0El.textContent = '–';
   }
 
-  toggleBtn.addEventListener('click', () => { running ? stop() : start(); });
+  toggleBtn.addEventListener('click', async () => {
+    if (!mediaStream || !audioCtx){
+      // 解析がまだ初期化されていない場合(自動初期化がブロックされていた場合など)、
+      // ユーザー操作をきっかけに改めて試す
+      await initMic();
+      if (!mediaStream || !audioCtx) return;
+    }
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+
+    if (mediaRecorder && mediaRecorder.state === 'recording'){
+      stopRecording();
+    } else {
+      startRecording();
+    }
+  });
 
   window.addEventListener('resize', () => {
     if (running){
@@ -740,6 +743,10 @@
       resizeCanvas(harmonicsCanvas);
     }
   });
+
+  // 解析(ピッチ検出・スペクトル・倍音構造)はページを開いたら自動で常時起動。
+  // ボタンは録音の開始/停止のみを担当する。
+  initMic();
 })();
 </script>
 

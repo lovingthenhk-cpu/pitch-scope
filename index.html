@@ -280,6 +280,13 @@
     transition:all 0.15s;
   }
   #downloadLink:hover{ background:rgba(77,255,158,0.08); border-color:var(--phosphor); }
+  .rec-panel-note{
+    flex-basis:100%;
+    text-align:center;
+    font-size:10px;
+    color:var(--text-dim);
+    letter-spacing:0.03em;
+  }
 </style>
 </head>
 <body>
@@ -357,9 +364,10 @@
 </footer>
 
 <div class="rec-panel" id="recPanel">
-  <div class="rec-panel-label"><span class="rec-dot" id="recDot"></span>録音完了</div>
+  <div class="rec-panel-label"><span class="rec-dot" id="recDot"></span>録音完了(WAV)</div>
   <audio id="playback" controls></audio>
   <a id="downloadLink" download>ダウンロード</a>
+  <div class="rec-panel-note">再生中は上の解析パネルにこの音声のピッチ・倍音構造がリアルタイム表示されます</div>
 </div>
 
 <script>
@@ -390,13 +398,16 @@
   const A4 = 440;
 
   let audioCtx, analyser, source, mediaStream;
+  let micAnalyser = null, playbackAnalyser = null;
   let running = false;
   let rafId = null;
   let smoothedFreq = null;
   const FFT_SIZE = 2048;
 
-  let mediaRecorder = null;
-  let recordedChunks = [];
+  let recorderNode = null;
+  let recordingActive = false;
+  let recordedSampleChunks = [];
+  let recordingSampleRate = null;
   let lastRecordingUrl = null;
 
   // 調整可能パラメータ(スライダーから更新される)
@@ -642,13 +653,42 @@
     rafId = requestAnimationFrame(loop);
   }
 
-  function pickMimeType(){
-    if (!window.MediaRecorder || !MediaRecorder.isTypeSupported) return '';
-    const candidates = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', 'audio/ogg;codecs=opus'];
-    for (const type of candidates){
-      if (MediaRecorder.isTypeSupported(type)) return type;
+  function encodeWav(samples, sampleRate){
+    const numChannels = 1;
+    const bitsPerSample = 16;
+    const bytesPerSample = bitsPerSample / 8;
+    const blockAlign = numChannels * bytesPerSample;
+    const byteRate = sampleRate * blockAlign;
+    const dataSize = samples.length * bytesPerSample;
+    const buffer = new ArrayBuffer(44 + dataSize);
+    const view = new DataView(buffer);
+
+    function writeString(offset, str){
+      for (let i = 0; i < str.length; i++){ view.setUint8(offset + i, str.charCodeAt(i)); }
     }
-    return '';
+
+    writeString(0, 'RIFF');
+    view.setUint32(4, 36 + dataSize, true);
+    writeString(8, 'WAVE');
+    writeString(12, 'fmt ');
+    view.setUint32(16, 16, true);
+    view.setUint16(20, 1, true); // PCM
+    view.setUint16(22, numChannels, true);
+    view.setUint32(24, sampleRate, true);
+    view.setUint32(28, byteRate, true);
+    view.setUint16(32, blockAlign, true);
+    view.setUint16(34, bitsPerSample, true);
+    writeString(36, 'data');
+    view.setUint32(40, dataSize, true);
+
+    let offset = 44;
+    for (let i = 0; i < samples.length; i++){
+      const s = Math.max(-1, Math.min(1, samples[i]));
+      view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+      offset += 2;
+    }
+
+    return new Blob([buffer], { type: 'audio/wav' });
   }
 
   async function initMic(){
@@ -662,11 +702,38 @@
       return;
     }
     audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-    analyser = audioCtx.createAnalyser();
-    analyser.fftSize = FFT_SIZE;
-    analyser.smoothingTimeConstant = 0.1;
+
+    micAnalyser = audioCtx.createAnalyser();
+    micAnalyser.fftSize = FFT_SIZE;
+    micAnalyser.smoothingTimeConstant = 0.1;
     source = audioCtx.createMediaStreamSource(mediaStream);
-    source.connect(analyser);
+    source.connect(micAnalyser);
+    analyser = micAnalyser;
+
+    // 録音用タップ(ScriptProcessorでPCMをそのまま蓄積 → 停止時にWAVへ)
+    recordingSampleRate = audioCtx.sampleRate;
+    recorderNode = audioCtx.createScriptProcessor(4096, 1, 1);
+    recorderNode.onaudioprocess = (e) => {
+      if (!recordingActive) return;
+      recordedSampleChunks.push(new Float32Array(e.inputBuffer.getChannelData(0)));
+    };
+    const silentGain = audioCtx.createGain();
+    silentGain.gain.value = 0; // ScriptProcessorを動かすためだけのダミー出力(音は出さない)
+    source.connect(recorderNode);
+    recorderNode.connect(silentGain);
+    silentGain.connect(audioCtx.destination);
+
+    // 再生用の解析タップ(録音の再生中はこちらのアナライザーに切り替える)
+    playbackAnalyser = audioCtx.createAnalyser();
+    playbackAnalyser.fftSize = FFT_SIZE;
+    playbackAnalyser.smoothingTimeConstant = 0.1;
+    const playbackSource = audioCtx.createMediaElementSource(playbackEl);
+    playbackSource.connect(playbackAnalyser);
+    playbackAnalyser.connect(audioCtx.destination);
+
+    playbackEl.addEventListener('play', () => { analyser = playbackAnalyser; });
+    playbackEl.addEventListener('pause', () => { analyser = micAnalyser; });
+    playbackEl.addEventListener('ended', () => { analyser = micAnalyser; });
 
     sampleRateEl.textContent = audioCtx.sampleRate + ' Hz';
     fftSizeEl.textContent = FFT_SIZE;
@@ -684,40 +751,34 @@
   function startRecording(){
     if (lastRecordingUrl){ URL.revokeObjectURL(lastRecordingUrl); lastRecordingUrl = null; }
     recPanel.classList.remove('show');
-    recordedChunks = [];
-    mediaRecorder = null;
-    const mimeType = pickMimeType();
-    try {
-      mediaRecorder = mimeType ? new MediaRecorder(mediaStream, { mimeType }) : new MediaRecorder(mediaStream);
-      mediaRecorder.ondataavailable = (e) => { if (e.data && e.data.size > 0) recordedChunks.push(e.data); };
-      mediaRecorder.start();
-      statusText.textContent = 'LISTENING · REC';
-      toggleBtn.textContent = 'Stop';
-      toggleBtn.classList.add('stop');
-    } catch (err){
-      mediaRecorder = null;
-      errorMsg.textContent = '録音を開始できませんでした: ' + err.message;
-    }
+    recordedSampleChunks = [];
+    recordingActive = true;
+    statusText.textContent = 'LISTENING · REC';
+    toggleBtn.textContent = 'Stop';
+    toggleBtn.classList.add('stop');
   }
 
   function stopRecording(){
-    if (!mediaRecorder || mediaRecorder.state === 'inactive') return;
-    mediaRecorder.onstop = () => {
-      if (recordedChunks.length === 0) return;
-      const mimeType = mediaRecorder.mimeType || 'audio/webm';
-      const blob = new Blob(recordedChunks, { type: mimeType });
-      lastRecordingUrl = URL.createObjectURL(blob);
-      playbackEl.src = lastRecordingUrl;
-      const ext = mimeType.includes('mp4') ? 'm4a' : mimeType.includes('ogg') ? 'ogg' : 'webm';
-      const ts = new Date().toISOString().replace(/[:.]/g, '-');
-      downloadLink.href = lastRecordingUrl;
-      downloadLink.download = `pitchscope-${ts}.${ext}`;
-      recPanel.classList.add('show');
-    };
-    mediaRecorder.stop();
+    recordingActive = false;
     statusText.textContent = 'LISTENING';
     toggleBtn.textContent = 'Start';
     toggleBtn.classList.remove('stop');
+
+    if (recordedSampleChunks.length === 0) return;
+
+    const total = recordedSampleChunks.reduce((sum, c) => sum + c.length, 0);
+    const merged = new Float32Array(total);
+    let offset = 0;
+    for (const chunk of recordedSampleChunks){ merged.set(chunk, offset); offset += chunk.length; }
+    recordedSampleChunks = [];
+
+    const wavBlob = encodeWav(merged, recordingSampleRate);
+    lastRecordingUrl = URL.createObjectURL(wavBlob);
+    playbackEl.src = lastRecordingUrl;
+    const ts = new Date().toISOString().replace(/[:.]/g, '-');
+    downloadLink.href = lastRecordingUrl;
+    downloadLink.download = `pitchscope-${ts}.wav`;
+    recPanel.classList.add('show');
   }
 
   toggleBtn.addEventListener('click', async () => {
@@ -729,7 +790,7 @@
     }
     if (audioCtx.state === 'suspended') audioCtx.resume();
 
-    if (mediaRecorder && mediaRecorder.state === 'recording'){
+    if (recordingActive){
       stopRecording();
     } else {
       startRecording();

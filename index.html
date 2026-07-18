@@ -361,8 +361,9 @@
 <footer>
   <button id="toggleBtn">Start</button>
   <button id="uploadBtn" type="button">音声ファイルを開く</button>
+  <button id="modeToggleBtn" type="button">解析対象: マイク</button>
   <input type="file" id="fileInput" accept="audio/*,.mp3,.wav,.wave,.m4a,.aac,.flac,.ogg,.oga,.opus,.wma,.aiff,.aif,.webm,.mp4,.3gp,.amr" style="display:none">
-  <div class="hint">マイクへのアクセスを許可すると解析(ピッチ・スペクトル・倍音構造)が自動で常時オンになります。「音声ファイルを開く」から手持ちの音声ファイルを読み込んで再生・解析することもできます。</div>
+  <div class="hint">マイクへのアクセスを許可すると解析(ピッチ・スペクトル・倍音構造)が自動で常時オンになります。「音声ファイルを開く」から手持ちの音声ファイルを読み込んで再生・解析することもできます。「解析対象」ボタンでマイク入力とファイル(録音/アップロード)のどちらを解析表示するか切り替えられます。</div>
 </footer>
 
 <div class="rec-panel" id="recPanel">
@@ -398,14 +399,17 @@
   const recLabelTextEl = document.getElementById('recLabelText');
   const uploadBtn = document.getElementById('uploadBtn');
   const fileInput = document.getElementById('fileInput');
+  const modeToggleBtn = document.getElementById('modeToggleBtn');
 
   const NOTE_NAMES = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
   const A4 = 440;
 
   let audioCtx, analyser, source, mediaStream;
-  let micAnalyser = null, playbackAnalyser = null, scrubAnalyser = null;
-  let scrubSourceNode = null;
-  let decodedBuffer = null; // 再生パネルの音源をデコードしたAudioBuffer(シークバー静止解析用)
+  let micAnalyser = null, playbackAnalyser = null;
+  let decodedBuffer = null; // 再生パネルの音源をデコードしたAudioBuffer(一時停止中のフレーム解析用)
+  let analysisMode = 'mic'; // 'mic': マイクを解析 / 'file': 再生パネルの音源を解析
+  let pausedFrameTimeBuf = null; // ファイルモードで一時停止中に固定表示するフレーム(時間領域)
+  let pausedFrameFreqDb = null;  // 同上(周波数領域, dB)
   let running = false;
   let rafId = null;
   let smoothedFreq = null;
@@ -453,6 +457,74 @@
     const name = NOTE_NAMES[((rounded % 12) + 12) % 12];
     const octave = Math.floor(rounded / 12) - 1;
     return { name, octave, cents, midi: rounded };
+  }
+
+  // 反復radix-2 FFT(in-place)。FFT_SIZEは2の累乗である前提。
+  function fftInPlace(re, im){
+    const n = re.length;
+    for (let i = 1, j = 0; i < n; i++){
+      let bit = n >> 1;
+      for (; j & bit; bit >>= 1) j ^= bit;
+      j ^= bit;
+      if (i < j){
+        let tmp = re[i]; re[i] = re[j]; re[j] = tmp;
+        tmp = im[i]; im[i] = im[j]; im[j] = tmp;
+      }
+    }
+    for (let len = 2; len <= n; len <<= 1){
+      const ang = -2 * Math.PI / len;
+      const wlr = Math.cos(ang), wli = Math.sin(ang);
+      for (let i = 0; i < n; i += len){
+        let wr = 1, wi = 0;
+        for (let k = 0; k < len / 2; k++){
+          const ur = re[i + k], ui = im[i + k];
+          const vr = re[i + k + len / 2] * wr - im[i + k + len / 2] * wi;
+          const vi = re[i + k + len / 2] * wi + im[i + k + len / 2] * wr;
+          re[i + k] = ur + vr; im[i + k] = ui + vi;
+          re[i + k + len / 2] = ur - vr; im[i + k + len / 2] = ui - vi;
+          const nwr = wr * wlr - wi * wli;
+          const nwi = wr * wli + wi * wlr;
+          wr = nwr; wi = nwi;
+        }
+      }
+    }
+  }
+
+  // 時間領域の1フレーム(Float32Array, 長さFFT_SIZE)から、
+  // AnalyserNode.getFloatFrequencyData相当のdBスペクトル(長さFFT_SIZE/2)を計算する。
+  // (一時停止中は音声が流れずAnalyserNodeが更新されないため、自前でFFTを行う)
+  function computeFFTMagnitudeDb(timeData){
+    const N = timeData.length;
+    const re = new Float32Array(N);
+    const im = new Float32Array(N);
+    for (let i = 0; i < N; i++){
+      const w = 0.5 - 0.5 * Math.cos(2 * Math.PI * i / (N - 1)); // Hann窓
+      re[i] = timeData[i] * w;
+    }
+    fftInPlace(re, im);
+    const bins = N / 2;
+    const db = new Float32Array(bins);
+    for (let k = 0; k < bins; k++){
+      const mag = Math.sqrt(re[k] * re[k] + im[k] * im[k]) / N;
+      db[k] = 20 * Math.log10(mag + 1e-12);
+    }
+    return db;
+  }
+
+  // ファイルモードで一時停止中に、指定した再生位置のフレームを切り出して
+  // pausedFrameTimeBuf / pausedFrameFreqDb に固定する(動かした後も表示が保持される)。
+  function updatePausedFileFrame(time){
+    if (!decodedBuffer){ pausedFrameTimeBuf = null; pausedFrameFreqDb = null; return; }
+    const ch = decodedBuffer.getChannelData(0);
+    const sr = decodedBuffer.sampleRate;
+    const startSample = Math.max(0, Math.min(ch.length - 1, Math.round(time * sr)));
+    const buf = new Float32Array(FFT_SIZE);
+    for (let i = 0; i < FFT_SIZE; i++){
+      const idx = startSample + i;
+      buf[i] = idx < ch.length ? ch[idx] : 0;
+    }
+    pausedFrameTimeBuf = buf;
+    pausedFrameFreqDb = computeFFTMagnitudeDb(buf);
   }
 
   // Autocorrelation-based pitch detection (ACF2+ style) with parabolic interpolation
@@ -647,10 +719,27 @@
   }
 
   function loop(){
-    const buffer = new Float32Array(analyser.fftSize);
-    analyser.getFloatTimeDomainData(buffer);
-    const freqData = new Float32Array(analyser.frequencyBinCount);
-    analyser.getFloatFrequencyData(freqData);
+    let buffer, freqData;
+
+    if (analysisMode === 'file' && decodedBuffer){
+      if (!playbackEl.paused){
+        // 再生中: playbackAnalyserからリアルタイムに取得
+        buffer = new Float32Array(playbackAnalyser.fftSize);
+        playbackAnalyser.getFloatTimeDomainData(buffer);
+        freqData = new Float32Array(playbackAnalyser.frequencyBinCount);
+        playbackAnalyser.getFloatFrequencyData(freqData);
+      } else {
+        // 一時停止中: シークで固定したフレームのスナップショットを使い続ける(表示が消えない)
+        buffer = pausedFrameTimeBuf || new Float32Array(FFT_SIZE);
+        freqData = pausedFrameFreqDb || new Float32Array(FFT_SIZE / 2).fill(-120);
+      }
+    } else {
+      // マイクモード
+      buffer = new Float32Array(micAnalyser.fftSize);
+      micAnalyser.getFloatTimeDomainData(buffer);
+      freqData = new Float32Array(micAnalyser.frequencyBinCount);
+      micAnalyser.getFloatFrequencyData(freqData);
+    }
 
     const { freq, clarity } = autoCorrelate(buffer, audioCtx.sampleRate);
     updateReadout(freq, clarity);
@@ -731,7 +820,7 @@
     recorderNode.connect(silentGain);
     silentGain.connect(audioCtx.destination);
 
-    // 再生用の解析タップ(録音の再生中はこちらのアナライザーに切り替える)
+    // 再生用の解析タップ(ファイルモードで再生中はこちらのアナライザーに切り替える)
     playbackAnalyser = audioCtx.createAnalyser();
     playbackAnalyser.fftSize = FFT_SIZE;
     playbackAnalyser.smoothingTimeConstant = 0.1;
@@ -739,21 +828,10 @@
     playbackSource.connect(playbackAnalyser);
     playbackAnalyser.connect(audioCtx.destination);
 
-    // シークバー操作用の解析タップ(一時停止中に再生位置を動かした時、
-    // その時点のフレームだけを無音で切り出して解析するために使う)
-    scrubAnalyser = audioCtx.createAnalyser();
-    scrubAnalyser.fftSize = FFT_SIZE;
-    scrubAnalyser.smoothingTimeConstant = 0;
-    const scrubGain = audioCtx.createGain();
-    scrubGain.gain.value = 0; // 実際の音は鳴らさない
-    scrubAnalyser.connect(scrubGain);
-    scrubGain.connect(audioCtx.destination);
-
-    playbackEl.addEventListener('play', () => { analyser = playbackAnalyser; });
-    playbackEl.addEventListener('pause', () => { analyser = micAnalyser; });
-    playbackEl.addEventListener('ended', () => { analyser = micAnalyser; });
-    playbackEl.addEventListener('seeking', () => { if (playbackEl.paused) analyzeScrubFrame(playbackEl.currentTime); });
-    playbackEl.addEventListener('timeupdate', () => { if (playbackEl.paused) analyzeScrubFrame(playbackEl.currentTime); });
+    // ファイルモードで一時停止中にシークバーを動かした時、その位置のフレームを固定表示する
+    playbackEl.addEventListener('pause', () => { if (analysisMode === 'file') updatePausedFileFrame(playbackEl.currentTime); });
+    playbackEl.addEventListener('seeking', () => { if (analysisMode === 'file' && playbackEl.paused) updatePausedFileFrame(playbackEl.currentTime); });
+    playbackEl.addEventListener('timeupdate', () => { if (analysisMode === 'file' && playbackEl.paused) updatePausedFileFrame(playbackEl.currentTime); });
 
     sampleRateEl.textContent = audioCtx.sampleRate + ' Hz';
     fftSizeEl.textContent = FFT_SIZE;
@@ -806,6 +884,11 @@
     downloadLink.download = `pitchscope-${ts}.wav`;
     recLabelTextEl.textContent = '録音完了(WAV)';
     recPanel.classList.add('show');
+
+    // 録音した音源を解析対象にする
+    analysisMode = 'file';
+    modeToggleBtn.textContent = '解析対象: ファイル';
+    updatePausedFileFrame(playbackEl.currentTime);
   }
 
   // アップロードされた音声ファイルを再生パネルにセットする。
@@ -840,42 +923,27 @@
     } catch (err){
       decodedBuffer = null; // デコードに失敗しても通常再生は問題なく行える
     }
+
+    // アップロードしたファイルを解析対象にする
+    analysisMode = 'file';
+    modeToggleBtn.textContent = '解析対象: ファイル';
+    updatePausedFileFrame(playbackEl.currentTime);
   }
 
-  // 再生が一時停止中に、指定した再生位置のフレームだけを無音で切り出して解析する。
-  // (通常の再生解析はplaybackAnalyserが音の流れに合わせて自動更新するが、
-  //  一時停止中は音が流れないのでこの関数で明示的にフレームを再現する)
-  function analyzeScrubFrame(time){
-    if (!decodedBuffer || !audioCtx || !scrubAnalyser) return;
-    if (audioCtx.state === 'suspended') audioCtx.resume();
-
-    if (scrubSourceNode){
-      try { scrubSourceNode.stop(); } catch(e){}
-      scrubSourceNode.disconnect();
-      scrubSourceNode = null;
-    }
-
-    const dur = decodedBuffer.duration;
-    const t = Math.max(0, Math.min(time, Math.max(0, dur - 0.001)));
-    const frameDur = FFT_SIZE / audioCtx.sampleRate;
-    const playDur = Math.max(0.001, Math.min(frameDur + 0.02, dur - t));
-
-    scrubSourceNode = audioCtx.createBufferSource();
-    scrubSourceNode.buffer = decodedBuffer;
-    scrubSourceNode.connect(scrubAnalyser);
-    try {
-      scrubSourceNode.start(0, t, playDur);
-    } catch (err){
-      return;
-    }
-    analyser = scrubAnalyser; // 次の描画ループでこのフレームのスナップショットを表示
-  }
 
   uploadBtn.addEventListener('click', () => fileInput.click());
   fileInput.addEventListener('change', (e) => {
     const file = e.target.files && e.target.files[0];
     loadUploadedFile(file);
     fileInput.value = '';
+  });
+
+  modeToggleBtn.addEventListener('click', () => {
+    analysisMode = analysisMode === 'mic' ? 'file' : 'mic';
+    modeToggleBtn.textContent = analysisMode === 'mic' ? '解析対象: マイク' : '解析対象: ファイル';
+    if (analysisMode === 'file' && playbackEl.paused){
+      updatePausedFileFrame(playbackEl.currentTime);
+    }
   });
 
   toggleBtn.addEventListener('click', async () => {

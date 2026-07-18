@@ -360,11 +360,13 @@
 
 <footer>
   <button id="toggleBtn">Start</button>
-  <div class="hint">マイクへのアクセスを許可すると解析(ピッチ・スペクトル・倍音構造)が自動で常時オンになります。ボタンは録音の開始/停止専用です。</div>
+  <button id="uploadBtn" type="button">音声ファイルを開く</button>
+  <input type="file" id="fileInput" accept="audio/*" style="display:none">
+  <div class="hint">マイクへのアクセスを許可すると解析(ピッチ・スペクトル・倍音構造)が自動で常時オンになります。「音声ファイルを開く」から手持ちの音声ファイルを読み込んで再生・解析することもできます。</div>
 </footer>
 
 <div class="rec-panel" id="recPanel">
-  <div class="rec-panel-label"><span class="rec-dot" id="recDot"></span>録音完了(WAV)</div>
+  <div class="rec-panel-label"><span class="rec-dot" id="recDot"></span><span id="recLabelText">録音完了(WAV)</span></div>
   <audio id="playback" controls></audio>
   <a id="downloadLink" download>ダウンロード</a>
   <div class="rec-panel-note">再生中は上の解析パネルにこの音声のピッチ・倍音構造がリアルタイム表示されます</div>
@@ -393,6 +395,9 @@
   const recPanel = document.getElementById('recPanel');
   const playbackEl = document.getElementById('playback');
   const downloadLink = document.getElementById('downloadLink');
+  const recLabelTextEl = document.getElementById('recLabelText');
+  const uploadBtn = document.getElementById('uploadBtn');
+  const fileInput = document.getElementById('fileInput');
 
   const NOTE_NAMES = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
   const A4 = 440;
@@ -409,6 +414,7 @@
   let recordedSampleChunks = [];
   let recordingSampleRate = null;
   let lastRecordingUrl = null;
+  let lastUploadUrl = null;
 
   // 調整可能パラメータ(スライダーから更新される)
   let NOISE_GATE = 0.0015;
@@ -772,14 +778,48 @@
     for (const chunk of recordedSampleChunks){ merged.set(chunk, offset); offset += chunk.length; }
     recordedSampleChunks = [];
 
+    if (lastUploadUrl){ URL.revokeObjectURL(lastUploadUrl); lastUploadUrl = null; }
+
     const wavBlob = encodeWav(merged, recordingSampleRate);
     lastRecordingUrl = URL.createObjectURL(wavBlob);
     playbackEl.src = lastRecordingUrl;
     const ts = new Date().toISOString().replace(/[:.]/g, '-');
     downloadLink.href = lastRecordingUrl;
     downloadLink.download = `pitchscope-${ts}.wav`;
+    recLabelTextEl.textContent = '録音完了(WAV)';
     recPanel.classList.add('show');
   }
+
+  // アップロードされた音声ファイルを再生パネルにセットする。
+  // 既存の録音再生と同じ <audio id="playback"> / playbackAnalyser を使い回すので、
+  // 再生中のピッチ・スペクトル・倍音構造の解析もそのまま適用される。
+  function loadUploadedFile(file){
+    if (!file) return;
+    errorMsg.textContent = '';
+    if (lastUploadUrl){ URL.revokeObjectURL(lastUploadUrl); lastUploadUrl = null; }
+    if (lastRecordingUrl){ URL.revokeObjectURL(lastRecordingUrl); lastRecordingUrl = null; }
+
+    lastUploadUrl = URL.createObjectURL(file);
+    playbackEl.src = lastUploadUrl;
+    downloadLink.href = lastUploadUrl;
+    downloadLink.download = file.name || 'uploaded-audio';
+    recLabelTextEl.textContent = 'アップロード音源: ' + (file.name || '(無題)');
+    recPanel.classList.add('show');
+
+    if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+    if (!audioCtx){
+      // マイク未許可などでまだ解析エンジンが初期化されていない場合、
+      // 再生はできるがピッチ解析は表示されない旨を伝える。
+      errorMsg.textContent = 'マイク未許可のため再生はできますが、ピッチ解析は無効です。';
+    }
+  }
+
+  uploadBtn.addEventListener('click', () => fileInput.click());
+  fileInput.addEventListener('change', (e) => {
+    const file = e.target.files && e.target.files[0];
+    loadUploadedFile(file);
+    fileInput.value = '';
+  });
 
   toggleBtn.addEventListener('click', async () => {
     if (!mediaStream || !audioCtx){

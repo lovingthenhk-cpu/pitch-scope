@@ -403,7 +403,9 @@
   const A4 = 440;
 
   let audioCtx, analyser, source, mediaStream;
-  let micAnalyser = null, playbackAnalyser = null;
+  let micAnalyser = null, playbackAnalyser = null, scrubAnalyser = null;
+  let scrubSourceNode = null;
+  let decodedBuffer = null; // 再生パネルの音源をデコードしたAudioBuffer(シークバー静止解析用)
   let running = false;
   let rafId = null;
   let smoothedFreq = null;
@@ -737,9 +739,21 @@
     playbackSource.connect(playbackAnalyser);
     playbackAnalyser.connect(audioCtx.destination);
 
+    // シークバー操作用の解析タップ(一時停止中に再生位置を動かした時、
+    // その時点のフレームだけを無音で切り出して解析するために使う)
+    scrubAnalyser = audioCtx.createAnalyser();
+    scrubAnalyser.fftSize = FFT_SIZE;
+    scrubAnalyser.smoothingTimeConstant = 0;
+    const scrubGain = audioCtx.createGain();
+    scrubGain.gain.value = 0; // 実際の音は鳴らさない
+    scrubAnalyser.connect(scrubGain);
+    scrubGain.connect(audioCtx.destination);
+
     playbackEl.addEventListener('play', () => { analyser = playbackAnalyser; });
     playbackEl.addEventListener('pause', () => { analyser = micAnalyser; });
     playbackEl.addEventListener('ended', () => { analyser = micAnalyser; });
+    playbackEl.addEventListener('seeking', () => { if (playbackEl.paused) analyzeScrubFrame(playbackEl.currentTime); });
+    playbackEl.addEventListener('timeupdate', () => { if (playbackEl.paused) analyzeScrubFrame(playbackEl.currentTime); });
 
     sampleRateEl.textContent = audioCtx.sampleRate + ' Hz';
     fftSizeEl.textContent = FFT_SIZE;
@@ -780,6 +794,10 @@
 
     if (lastUploadUrl){ URL.revokeObjectURL(lastUploadUrl); lastUploadUrl = null; }
 
+    // シークバー静止解析用に、WAVエンコード前のPCMデータからそのままAudioBufferを作る
+    decodedBuffer = audioCtx.createBuffer(1, merged.length, recordingSampleRate);
+    decodedBuffer.copyToChannel(merged, 0);
+
     const wavBlob = encodeWav(merged, recordingSampleRate);
     lastRecordingUrl = URL.createObjectURL(wavBlob);
     playbackEl.src = lastRecordingUrl;
@@ -793,11 +811,12 @@
   // アップロードされた音声ファイルを再生パネルにセットする。
   // 既存の録音再生と同じ <audio id="playback"> / playbackAnalyser を使い回すので、
   // 再生中のピッチ・スペクトル・倍音構造の解析もそのまま適用される。
-  function loadUploadedFile(file){
+  async function loadUploadedFile(file){
     if (!file) return;
     errorMsg.textContent = '';
     if (lastUploadUrl){ URL.revokeObjectURL(lastUploadUrl); lastUploadUrl = null; }
     if (lastRecordingUrl){ URL.revokeObjectURL(lastRecordingUrl); lastRecordingUrl = null; }
+    decodedBuffer = null;
 
     lastUploadUrl = URL.createObjectURL(file);
     playbackEl.src = lastUploadUrl;
@@ -811,7 +830,45 @@
       // マイク未許可などでまだ解析エンジンが初期化されていない場合、
       // 再生はできるがピッチ解析は表示されない旨を伝える。
       errorMsg.textContent = 'マイク未許可のため再生はできますが、ピッチ解析は無効です。';
+      return;
     }
+
+    // シークバー静止解析用に、ファイル自体もWeb Audio APIでデコードしておく
+    try {
+      const arrBuf = await file.arrayBuffer();
+      decodedBuffer = await audioCtx.decodeAudioData(arrBuf);
+    } catch (err){
+      decodedBuffer = null; // デコードに失敗しても通常再生は問題なく行える
+    }
+  }
+
+  // 再生が一時停止中に、指定した再生位置のフレームだけを無音で切り出して解析する。
+  // (通常の再生解析はplaybackAnalyserが音の流れに合わせて自動更新するが、
+  //  一時停止中は音が流れないのでこの関数で明示的にフレームを再現する)
+  function analyzeScrubFrame(time){
+    if (!decodedBuffer || !audioCtx || !scrubAnalyser) return;
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+
+    if (scrubSourceNode){
+      try { scrubSourceNode.stop(); } catch(e){}
+      scrubSourceNode.disconnect();
+      scrubSourceNode = null;
+    }
+
+    const dur = decodedBuffer.duration;
+    const t = Math.max(0, Math.min(time, Math.max(0, dur - 0.001)));
+    const frameDur = FFT_SIZE / audioCtx.sampleRate;
+    const playDur = Math.max(0.001, Math.min(frameDur + 0.02, dur - t));
+
+    scrubSourceNode = audioCtx.createBufferSource();
+    scrubSourceNode.buffer = decodedBuffer;
+    scrubSourceNode.connect(scrubAnalyser);
+    try {
+      scrubSourceNode.start(0, t, playDur);
+    } catch (err){
+      return;
+    }
+    analyser = scrubAnalyser; // 次の描画ループでこのフレームのスナップショットを表示
   }
 
   uploadBtn.addEventListener('click', () => fileInput.click());

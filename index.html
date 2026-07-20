@@ -449,6 +449,21 @@
     ctx.setTransform(dpr,0,0,dpr,0,0);
   }
 
+  // rec-panel の表示/非表示切り替えでレイアウトの高さ配分が変わるため、
+  // その直後に3つのcanvasを必ず再計測・再サイズする。
+  // classList変更直後はまだ古いレイアウトのままrectが取れることがあるので、
+  // 2フレーム分rAFを挟んでから測る。
+  function resizeAllCanvasesNextFrame(){
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        if (!running) return;
+        resizeCanvas(waveCanvas);
+        resizeCanvas(spectrumCanvas);
+        resizeCanvas(harmonicsCanvas);
+      });
+    });
+  }
+
   function freqToNote(freq){
     if (!freq || freq <= 0) return null;
     const midi = 69 + 12 * Math.log2(freq / A4);
@@ -884,6 +899,7 @@
     downloadLink.download = `pitchscope-${ts}.wav`;
     recLabelTextEl.textContent = '録音完了(WAV)';
     recPanel.classList.add('show');
+    resizeAllCanvasesNextFrame();
 
     // 録音した音源を解析対象にする
     analysisMode = 'file';
@@ -907,6 +923,7 @@
     downloadLink.download = file.name || 'uploaded-audio';
     recLabelTextEl.textContent = 'アップロード音源: ' + (file.name || '(無題)');
     recPanel.classList.add('show');
+    resizeAllCanvasesNextFrame();
 
     if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
     if (!audioCtx){

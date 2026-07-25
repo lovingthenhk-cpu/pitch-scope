@@ -101,7 +101,8 @@
   .ctrl-hint{ font-size:10px; color:var(--text-dim); }
 
   main{
-    flex:1;
+    flex:1 1 0;
+    min-height:0;
     display:grid;
     grid-template-columns: 0.85fr 1fr 0.85fr;
     gap:1px;
@@ -252,18 +253,22 @@
   .error-msg{ color:var(--red); font-size:12px; text-align:center; margin-top:8px; }
 
   .rec-panel{
-    display:none;
+    display:flex;
+    flex-shrink:0;
     align-items:center; justify-content:center; gap:16px;
     flex-wrap:wrap;
     padding:12px 24px 20px;
   }
-  .rec-panel.show{ display:flex; }
   .rec-panel-label{
     font-size:11px; letter-spacing:0.06em; color:var(--text-dim);
     display:flex; align-items:center; gap:8px;
   }
   .rec-dot{
-    width:8px; height:8px; border-radius:50%; background:var(--red);
+    width:8px; height:8px; border-radius:50%; background:var(--text-dim);
+    transition:background 0.2s, box-shadow 0.2s;
+  }
+  .rec-dot.active{
+    background:var(--red);
     box-shadow:0 0 8px var(--red);
   }
   audio#playback{
@@ -280,6 +285,7 @@
     transition:all 0.15s;
   }
   #downloadLink:hover{ background:rgba(77,255,158,0.08); border-color:var(--phosphor); }
+  #downloadLink.disabled{ opacity:0.35; pointer-events:none; }
   .rec-panel-note{
     flex-basis:100%;
     text-align:center;
@@ -308,6 +314,11 @@
     <label for="claritySlider">クラリティ閾値 <span id="clarityVal">0.75</span></label>
     <input type="range" id="claritySlider" min="0.3" max="0.98" step="0.01" value="0.75">
     <span class="ctrl-hint">小さいほど雑音でも音程判定されやすい(誤検出も増える)</span>
+  </div>
+  <div class="ctrl">
+    <label for="harmonicCountSlider">表示倍音数 <span id="harmonicCountVal">24</span></label>
+    <input type="range" id="harmonicCountSlider" min="8" max="40" step="1" value="24">
+    <span class="ctrl-hint">増やすほど高次倍音まで表示(バーは細くなります)</span>
   </div>
 </div>
 
@@ -353,7 +364,7 @@
         <span><span class="swatch h"></span>倍音</span>
         <span><span class="swatch sf"></span>Singer's Formant (2.8–3.4kHz)</span>
       </div>
-      <div class="harmonics-num">基音 <b id="harmonicsF0">–</b> Hz を基準に第1〜16倍音を表示</div>
+      <div class="harmonics-num">基音 <b id="harmonicsF0">–</b> Hz を基準に第1〜<b id="harmonicsCountLabel">24</b>倍音を表示</div>
     </div>
   </div>
 </main>
@@ -367,9 +378,9 @@
 </footer>
 
 <div class="rec-panel" id="recPanel">
-  <div class="rec-panel-label"><span class="rec-dot" id="recDot"></span><span id="recLabelText">録音完了(WAV)</span></div>
+  <div class="rec-panel-label"><span class="rec-dot" id="recDot"></span><span id="recLabelText">録音/アップロードした音声はここに表示されます</span></div>
   <audio id="playback" controls></audio>
-  <a id="downloadLink" download>ダウンロード</a>
+  <a id="downloadLink" class="disabled" download>ダウンロード</a>
   <div class="rec-panel-note">再生中は上の解析パネルにこの音声のピッチ・倍音構造がリアルタイム表示されます</div>
 </div>
 
@@ -394,6 +405,7 @@
   const spectrumCtx = spectrumCanvas.getContext('2d');
   const harmonicsCtx = harmonicsCanvas.getContext('2d');
   const recPanel = document.getElementById('recPanel');
+  const recDot = document.getElementById('recDot');
   const playbackEl = document.getElementById('playback');
   const downloadLink = document.getElementById('downloadLink');
   const recLabelTextEl = document.getElementById('recLabelText');
@@ -430,6 +442,9 @@
   const claritySlider = document.getElementById('claritySlider');
   const gateVal = document.getElementById('gateVal');
   const clarityValLabel = document.getElementById('clarityVal');
+  const harmonicCountSlider = document.getElementById('harmonicCountSlider');
+  const harmonicCountVal = document.getElementById('harmonicCountVal');
+  const harmonicsCountLabelEl = document.getElementById('harmonicsCountLabel');
 
   gateSlider.addEventListener('input', () => {
     NOISE_GATE = parseFloat(gateSlider.value);
@@ -438,6 +453,11 @@
   claritySlider.addEventListener('input', () => {
     CLARITY_GATE = parseFloat(claritySlider.value);
     clarityValLabel.textContent = CLARITY_GATE.toFixed(2);
+  });
+  harmonicCountSlider.addEventListener('input', () => {
+    HARMONIC_COUNT = parseInt(harmonicCountSlider.value, 10);
+    harmonicCountVal.textContent = HARMONIC_COUNT;
+    harmonicsCountLabelEl.textContent = HARMONIC_COUNT;
   });
 
   function resizeCanvas(canvas){
@@ -449,20 +469,18 @@
     ctx.setTransform(dpr,0,0,dpr,0,0);
   }
 
-  // rec-panel の表示/非表示切り替えでレイアウトの高さ配分が変わるため、
-  // その直後に3つのcanvasを必ず再計測・再サイズする。
-  // classList変更直後はまだ古いレイアウトのままrectが取れることがあるので、
-  // 2フレーム分rAFを挟んでから測る。
-  function resizeAllCanvasesNextFrame(){
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => {
-        if (!running) return;
-        resizeCanvas(waveCanvas);
-        resizeCanvas(spectrumCanvas);
-        resizeCanvas(harmonicsCanvas);
-      });
-    });
-  }
+  // canvasの表示サイズが変わるたびに(recパネルの中身が変わる、ウィンドウ幅が変わる、
+  // レスポンシブでグリッド列数が変わる、等どんな理由でも)確実に検知して再サイズする。
+  // タイミングを勘で待つ手動リサイズより、ResizeObserverの方が取りこぼしがなく安全。
+  const canvasResizeObserver = new ResizeObserver(() => {
+    if (!running) return;
+    resizeCanvas(waveCanvas);
+    resizeCanvas(spectrumCanvas);
+    resizeCanvas(harmonicsCanvas);
+  });
+  canvasResizeObserver.observe(waveCanvas);
+  canvasResizeObserver.observe(spectrumCanvas);
+  canvasResizeObserver.observe(harmonicsCanvas);
 
   function freqToNote(freq){
     if (!freq || freq <= 0) return null;
@@ -667,7 +685,7 @@
     }
   }
 
-  const HARMONIC_COUNT = 16;
+  let HARMONIC_COUNT = 24;
   const SF_LOW = 2800, SF_HIGH = 3400; // Singer's Formant band
 
   function drawHarmonics(freqData, f0){
@@ -702,8 +720,11 @@
 
     const floor = maxDb - 55; // 表示するダイナミックレンジ(dB)
     const labelH = 16;
-    const gap = 4;
+    const gap = HARMONIC_COUNT > 28 ? 2 : (HARMONIC_COUNT > 20 ? 3 : 4);
     const barW = (w - gap * (HARMONIC_COUNT - 1)) / HARMONIC_COUNT;
+    // バーが細くなるほどラベル(倍音番号)を間引いて重なりを防ぐ
+    const labelStep = barW >= 13 ? 1 : Math.ceil(13 / Math.max(barW, 1));
+    const fontSize = barW >= 13 ? 9 : 8;
 
     for (let n = 0; n < HARMONIC_COUNT; n++){
       const db = dbs[n];
@@ -726,10 +747,12 @@
       harmonicsCtx.fillStyle = grad;
       harmonicsCtx.fillRect(x, h - labelH - barH, barW, barH);
 
-      harmonicsCtx.fillStyle = isSF ? '#ffb648' : '#5c7a6d';
-      harmonicsCtx.font = '9px "IBM Plex Mono", monospace';
-      harmonicsCtx.textAlign = 'center';
-      harmonicsCtx.fillText(String(n + 1), x + barW / 2, h - 5);
+      if ((n + 1) % labelStep === 0 || n === HARMONIC_COUNT - 1){
+        harmonicsCtx.fillStyle = isSF ? '#ffb648' : '#5c7a6d';
+        harmonicsCtx.font = fontSize + 'px "IBM Plex Mono", monospace';
+        harmonicsCtx.textAlign = 'center';
+        harmonicsCtx.fillText(String(n + 1), x + barW / 2, h - 5);
+      }
     }
   }
 
@@ -863,7 +886,6 @@
 
   function startRecording(){
     if (lastRecordingUrl){ URL.revokeObjectURL(lastRecordingUrl); lastRecordingUrl = null; }
-    recPanel.classList.remove('show');
     recordedSampleChunks = [];
     recordingActive = true;
     statusText.textContent = 'LISTENING · REC';
@@ -898,8 +920,8 @@
     downloadLink.href = lastRecordingUrl;
     downloadLink.download = `pitchscope-${ts}.wav`;
     recLabelTextEl.textContent = '録音完了(WAV)';
-    recPanel.classList.add('show');
-    resizeAllCanvasesNextFrame();
+    recDot.classList.add('active');
+    downloadLink.classList.remove('disabled');
 
     // 録音した音源を解析対象にする
     analysisMode = 'file';
@@ -922,8 +944,8 @@
     downloadLink.href = lastUploadUrl;
     downloadLink.download = file.name || 'uploaded-audio';
     recLabelTextEl.textContent = 'アップロード音源: ' + (file.name || '(無題)');
-    recPanel.classList.add('show');
-    resizeAllCanvasesNextFrame();
+    recDot.classList.add('active');
+    downloadLink.classList.remove('disabled');
 
     if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
     if (!audioCtx){
@@ -979,13 +1001,8 @@
     }
   });
 
-  window.addEventListener('resize', () => {
-    if (running){
-      resizeCanvas(waveCanvas);
-      resizeCanvas(spectrumCanvas);
-      resizeCanvas(harmonicsCanvas);
-    }
-  });
+  // canvasのリサイズはcanvasResizeObserverが検知して行うため、
+  // window resizeを個別に監視する必要はない(グリッド列数の変化も含めて自動追従する)。
 
   // 解析(ピッチ検出・スペクトル・倍音構造)はページを開いたら自動で常時起動。
   // ボタンは録音の開始/停止のみを担当する。

@@ -203,7 +203,7 @@
   }
   #waveCanvas{ flex:1.3; min-height:0; }
   #spectrumCanvas{ flex:1; min-height:0; }
-  #harmonicsCanvas{ flex:1; min-height:0; }
+  #harmonicsCanvas{ width:100%; height:100%; min-height:0; }
 
   .harmonics-legend{
     display:flex; gap:16px; font-size:10px; color:var(--text-dim);
@@ -219,6 +219,16 @@
     text-align:center; margin-top:2px; font-size:12px; color:var(--text-dim);
   }
   .harmonics-num b{ color:var(--text); }
+
+  .harmonics-canvas-box{ position:relative; flex:1; min-height:0; display:flex; }
+  .harmonics-tooltip{
+    position:absolute; display:none; pointer-events:none;
+    background:var(--panel); border:1px solid var(--grid);
+    color:var(--text); font-size:11px; padding:4px 8px; border-radius:2px;
+    white-space:nowrap; z-index:10; transform:translate(-50%, -100%);
+  }
+  .harmonics-tooltip b{ color:var(--phosphor); }
+  .harmonics-tooltip.sf b{ color:var(--amber); }
 
   .stats-row{
     display:flex; gap:24px; font-size:11px; color:var(--text-dim);
@@ -359,7 +369,10 @@
   <div class="panel">
     <div class="panel-label">Harmonic Structure (Current Frame)</div>
     <div class="scope-wrap">
-      <canvas id="harmonicsCanvas"></canvas>
+      <div class="harmonics-canvas-box">
+        <canvas id="harmonicsCanvas"></canvas>
+        <div class="harmonics-tooltip" id="harmonicsTooltip"></div>
+      </div>
       <div class="harmonics-legend">
         <span><span class="swatch h"></span>倍音</span>
         <span><span class="swatch sf"></span>Singer's Formant (2.8–3.4kHz)</span>
@@ -454,6 +467,25 @@
     CLARITY_GATE = parseFloat(claritySlider.value);
     clarityValLabel.textContent = CLARITY_GATE.toFixed(2);
   });
+  const harmonicsTooltip = document.getElementById('harmonicsTooltip');
+
+  harmonicsCanvas.addEventListener('mousemove', (e) => {
+    if (!harmonicsBars.length){ harmonicsTooltip.style.display = 'none'; return; }
+    const rect = harmonicsCanvas.getBoundingClientRect();
+    const mx = e.clientX - rect.left;
+    const my = e.clientY - rect.top;
+    const bar = harmonicsBars.find(b => mx >= b.x0 && mx < b.x1 && b.hasData);
+    if (!bar){ harmonicsTooltip.style.display = 'none'; return; }
+    harmonicsTooltip.classList.toggle('sf', bar.isSF);
+    harmonicsTooltip.innerHTML = '第' + bar.n + '倍音　<b>' + bar.freq.toFixed(1) + ' Hz</b>';
+    harmonicsTooltip.style.left = (bar.x0 + (bar.x1 - bar.x0) / 2) + 'px';
+    harmonicsTooltip.style.top = Math.max(0, my - 10) + 'px';
+    harmonicsTooltip.style.display = 'block';
+  });
+  harmonicsCanvas.addEventListener('mouseleave', () => {
+    harmonicsTooltip.style.display = 'none';
+  });
+
   harmonicCountSlider.addEventListener('input', () => {
     HARMONIC_COUNT = parseInt(harmonicCountSlider.value, 10);
     harmonicCountVal.textContent = HARMONIC_COUNT;
@@ -687,6 +719,7 @@
 
   let HARMONIC_COUNT = 24;
   const SF_LOW = 2800, SF_HIGH = 3400; // Singer's Formant band
+  let harmonicsBars = []; // ホバー判定用: 各バーのx範囲と倍音番号・周波数を保持
 
   function drawHarmonics(freqData, f0){
     const w = harmonicsCanvas.clientWidth, h = harmonicsCanvas.clientHeight;
@@ -694,6 +727,7 @@
 
     if (!f0 || f0 <= 0 || !audioCtx){
       harmonicsF0El.textContent = '–';
+      harmonicsBars = [];
       return;
     }
     harmonicsF0El.textContent = f0.toFixed(1);
@@ -726,9 +760,13 @@
     const labelStep = barW >= 13 ? 1 : Math.ceil(13 / Math.max(barW, 1));
     const fontSize = barW >= 13 ? 9 : 8;
 
+    harmonicsBars = [];
+
     for (let n = 0; n < HARMONIC_COUNT; n++){
       const db = dbs[n];
       const x = n * (barW + gap);
+      const freqForHit = f0 * (n + 1);
+      harmonicsBars.push({ x0: x, x1: x + barW + gap, n: n + 1, freq: freqForHit, isSF: freqForHit >= SF_LOW && freqForHit <= SF_HIGH, hasData: db !== null });
       if (db === null) continue;
 
       const norm = Math.max(0, Math.min(1, (db - floor) / (maxDb - floor)));

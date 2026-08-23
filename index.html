@@ -262,9 +262,10 @@
   .hint{ font-size:11px; color:var(--text-dim); text-align:center; max-width:340px; }
   .device-row{
     display:flex; align-items:center; justify-content:center;
-    gap:8px; flex-wrap:wrap;
+    gap:8px; flex-wrap:nowrap; white-space:nowrap;
     font-size:11px; color:var(--text-dim); letter-spacing:0.05em;
   }
+  .device-row label{ white-space:nowrap; flex-shrink:0; }
   .device-row select{
     font-family:'IBM Plex Mono', monospace;
     font-size:12px;
@@ -274,7 +275,10 @@
     border-radius:2px;
     padding:5px 8px;
     outline:none;
-    max-width:180px;
+    max-width:140px;
+    overflow:hidden;
+    text-overflow:ellipsis;
+    white-space:nowrap;
   }
   .error-msg{ color:var(--red); font-size:12px; text-align:center; margin-top:8px; }
 

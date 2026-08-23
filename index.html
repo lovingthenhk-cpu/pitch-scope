@@ -99,16 +99,6 @@
     cursor:pointer;
   }
   .ctrl-hint{ font-size:10px; color:var(--text-dim); }
-  .ctrl select{
-    font-family:'IBM Plex Mono', monospace;
-    font-size:12px;
-    background:var(--panel);
-    color:var(--text);
-    border:1px solid var(--grid);
-    border-radius:2px;
-    padding:6px 8px;
-    outline:none;
-  }
 
   main{
     flex:1 1 0;
@@ -270,6 +260,22 @@
   button.stop:hover{ background:rgba(255,92,92,0.08); border-color:var(--red); }
 
   .hint{ font-size:11px; color:var(--text-dim); text-align:center; max-width:340px; }
+  .device-row{
+    display:flex; align-items:center; justify-content:center;
+    gap:8px; flex-wrap:wrap;
+    font-size:11px; color:var(--text-dim); letter-spacing:0.05em;
+  }
+  .device-row select{
+    font-family:'IBM Plex Mono', monospace;
+    font-size:12px;
+    background:var(--panel);
+    color:var(--text);
+    border:1px solid var(--grid);
+    border-radius:2px;
+    padding:5px 8px;
+    outline:none;
+    max-width:180px;
+  }
   .error-msg{ color:var(--red); font-size:12px; text-align:center; margin-top:8px; }
 
   .rec-panel{
@@ -340,16 +346,6 @@
     <input type="range" id="harmonicCountSlider" min="8" max="40" step="1" value="24">
     <span class="ctrl-hint">増やすほど高次倍音まで表示(バーは細くなります)</span>
   </div>
-  <div class="ctrl">
-    <label for="micSelect">入力マイク</label>
-    <select id="micSelect"></select>
-    <span class="ctrl-hint">切り替えると即座にそのマイクの解析に切り替わります</span>
-  </div>
-  <div class="ctrl">
-    <label for="outputSelect">出力デバイス(再生用)</label>
-    <select id="outputSelect"></select>
-    <span class="ctrl-hint" id="outputHint">録音/アップロード音源の再生先を切り替えます</span>
-  </div>
 </div>
 
 <main>
@@ -407,6 +403,12 @@
   <button id="uploadBtn" type="button">音声ファイルを開く</button>
   <button id="modeToggleBtn" type="button">解析対象: マイク</button>
   <input type="file" id="fileInput" accept="audio/*,.mp3,.wav,.wave,.m4a,.aac,.flac,.ogg,.oga,.opus,.wma,.aiff,.aif,.webm,.mp4,.3gp,.amr" style="display:none">
+  <div class="device-row">
+    <label for="micSelect">マイク</label>
+    <select id="micSelect" title="切り替えると即座にそのマイクの解析に切り替わります"></select>
+    <label for="outputSelect">出力</label>
+    <select id="outputSelect" title="録音/アップロード音源の再生先を切り替えます"></select>
+  </div>
   <div class="hint">マイクへのアクセスを許可すると解析(ピッチ・スペクトル・倍音構造)が自動で常時オンになります。「音声ファイルを開く」から手持ちの音声ファイルを読み込んで再生・解析することもできます。「解析対象」ボタンでマイク入力とファイル(録音/アップロード)のどちらを解析表示するか切り替えられます。</div>
 </footer>
 
@@ -447,7 +449,6 @@
   const modeToggleBtn = document.getElementById('modeToggleBtn');
   const micSelect = document.getElementById('micSelect');
   const outputSelect = document.getElementById('outputSelect');
-  const outputHintEl = document.getElementById('outputHint');
 
   const NOTE_NAMES = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
   const A4 = 440;
@@ -956,7 +957,7 @@
     if (!sinkSupported){
       outputSelect.innerHTML = '<option>このブラウザは非対応</option>';
       outputSelect.disabled = true;
-      outputHintEl.textContent = 'お使いのブラウザは出力デバイス切り替えに非対応です(Chrome等でお試しください)';
+      outputSelect.title = 'お使いのブラウザは出力デバイス切り替えに非対応です(Chrome等でお試しください)';
       return;
     }
     let devices;

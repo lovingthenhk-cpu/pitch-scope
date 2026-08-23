@@ -99,6 +99,16 @@
     cursor:pointer;
   }
   .ctrl-hint{ font-size:10px; color:var(--text-dim); }
+  .ctrl select{
+    font-family:'IBM Plex Mono', monospace;
+    font-size:12px;
+    background:var(--panel);
+    color:var(--text);
+    border:1px solid var(--grid);
+    border-radius:2px;
+    padding:6px 8px;
+    outline:none;
+  }
 
   main{
     flex:1 1 0;
@@ -330,6 +340,11 @@
     <input type="range" id="harmonicCountSlider" min="8" max="40" step="1" value="24">
     <span class="ctrl-hint">増やすほど高次倍音まで表示(バーは細くなります)</span>
   </div>
+  <div class="ctrl">
+    <label for="micSelect">入力マイク</label>
+    <select id="micSelect"></select>
+    <span class="ctrl-hint">切り替えると即座にそのマイクの解析に切り替わります</span>
+  </div>
 </div>
 
 <main>
@@ -425,6 +440,7 @@
   const uploadBtn = document.getElementById('uploadBtn');
   const fileInput = document.getElementById('fileInput');
   const modeToggleBtn = document.getElementById('modeToggleBtn');
+  const micSelect = document.getElementById('micSelect');
 
   const NOTE_NAMES = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
   const A4 = 440;
@@ -864,6 +880,70 @@
     return new Blob([buffer], { type: 'audio/wav' });
   }
 
+  // 使用可能な音声入力デバイス一覧を取得し、セレクトボックスに反映する。
+  // ラベル(機種名)はマイク許可済みでないと空文字になるため、getUserMedia成功後に呼ぶ。
+  async function refreshMicList(){
+    let devices;
+    try {
+      devices = await navigator.mediaDevices.enumerateDevices();
+    } catch (err){
+      return;
+    }
+    const mics = devices.filter(d => d.kind === 'audioinput');
+    const currentId = micSelect.value;
+    micSelect.innerHTML = '';
+    mics.forEach((d, i) => {
+      const opt = document.createElement('option');
+      opt.value = d.deviceId;
+      opt.textContent = d.label || `マイク ${i + 1}`;
+      micSelect.appendChild(opt);
+    });
+    // 直前の選択が一覧内にまだ存在すればそれを維持する
+    if (currentId && mics.some(d => d.deviceId === currentId)){
+      micSelect.value = currentId;
+    } else if (mediaStream){
+      const activeId = mediaStream.getAudioTracks()[0]?.getSettings().deviceId;
+      if (activeId) micSelect.value = activeId;
+    }
+  }
+
+  // 選択されたデバイスIDのマイクに切り替える。
+  // audioCtx / micAnalyser / recorderNode はそのまま使い回し、
+  // MediaStreamSource(source)だけを新しいストリームのものに差し替える。
+  async function switchMic(deviceId){
+    if (!audioCtx) return;
+    errorMsg.textContent = '';
+    let newStream;
+    try {
+      newStream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          deviceId: deviceId ? { exact: deviceId } : undefined,
+          echoCancellation:false, noiseSuppression:false, autoGainControl:true
+        }
+      });
+    } catch (err){
+      errorMsg.textContent = 'マイクの切り替えに失敗しました: ' + err.message;
+      return;
+    }
+
+    if (source){
+      try { source.disconnect(); } catch (e) {}
+    }
+    if (mediaStream){
+      mediaStream.getTracks().forEach(t => t.stop());
+    }
+
+    mediaStream = newStream;
+    source = audioCtx.createMediaStreamSource(mediaStream);
+    source.connect(micAnalyser);
+    source.connect(recorderNode);
+
+    await refreshMicList();
+  }
+
+  micSelect.addEventListener('change', () => switchMic(micSelect.value));
+  navigator.mediaDevices.addEventListener?.('devicechange', refreshMicList);
+
   async function initMic(){
     errorMsg.textContent = '';
     try {
@@ -911,6 +991,7 @@
 
     sampleRateEl.textContent = audioCtx.sampleRate + ' Hz';
     fftSizeEl.textContent = FFT_SIZE;
+    refreshMicList();
 
     running = true;
     liveDot.classList.add('live');

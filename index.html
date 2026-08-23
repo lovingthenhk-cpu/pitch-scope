@@ -345,6 +345,11 @@
     <select id="micSelect"></select>
     <span class="ctrl-hint">切り替えると即座にそのマイクの解析に切り替わります</span>
   </div>
+  <div class="ctrl">
+    <label for="outputSelect">出力デバイス(再生用)</label>
+    <select id="outputSelect"></select>
+    <span class="ctrl-hint" id="outputHint">録音/アップロード音源の再生先を切り替えます</span>
+  </div>
 </div>
 
 <main>
@@ -441,6 +446,8 @@
   const fileInput = document.getElementById('fileInput');
   const modeToggleBtn = document.getElementById('modeToggleBtn');
   const micSelect = document.getElementById('micSelect');
+  const outputSelect = document.getElementById('outputSelect');
+  const outputHintEl = document.getElementById('outputHint');
 
   const NOTE_NAMES = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
   const A4 = 440;
@@ -941,8 +948,50 @@
     await refreshMicList();
   }
 
+  // 再生(録音/アップロード音源)の出力先デバイス一覧を取得しセレクトに反映する。
+  // AudioContext.setSinkId に対応していないブラウザではセレクトを無効化し、その旨を表示する。
+  const sinkSupported = typeof AudioContext !== 'undefined' && 'setSinkId' in AudioContext.prototype;
+
+  async function refreshOutputList(){
+    if (!sinkSupported){
+      outputSelect.innerHTML = '<option>このブラウザは非対応</option>';
+      outputSelect.disabled = true;
+      outputHintEl.textContent = 'お使いのブラウザは出力デバイス切り替えに非対応です(Chrome等でお試しください)';
+      return;
+    }
+    let devices;
+    try {
+      devices = await navigator.mediaDevices.enumerateDevices();
+    } catch (err){
+      return;
+    }
+    const outputs = devices.filter(d => d.kind === 'audiooutput');
+    const currentId = outputSelect.value;
+    outputSelect.innerHTML = '';
+    outputs.forEach((d, i) => {
+      const opt = document.createElement('option');
+      opt.value = d.deviceId;
+      opt.textContent = d.label || `出力デバイス ${i + 1}`;
+      outputSelect.appendChild(opt);
+    });
+    if (currentId && outputs.some(d => d.deviceId === currentId)){
+      outputSelect.value = currentId;
+    }
+  }
+
+  async function switchOutput(deviceId){
+    if (!sinkSupported || !audioCtx) return;
+    try {
+      await audioCtx.setSinkId(deviceId);
+    } catch (err){
+      errorMsg.textContent = '出力デバイスの切り替えに失敗しました: ' + err.message;
+    }
+  }
+
+  outputSelect.addEventListener('change', () => switchOutput(outputSelect.value));
+
   micSelect.addEventListener('change', () => switchMic(micSelect.value));
-  navigator.mediaDevices.addEventListener?.('devicechange', refreshMicList);
+  navigator.mediaDevices.addEventListener?.('devicechange', () => { refreshMicList(); refreshOutputList(); });
 
   async function initMic(){
     errorMsg.textContent = '';
@@ -992,6 +1041,7 @@
     sampleRateEl.textContent = audioCtx.sampleRate + ' Hz';
     fftSizeEl.textContent = FFT_SIZE;
     refreshMicList();
+    refreshOutputList();
 
     running = true;
     liveDot.classList.add('live');
